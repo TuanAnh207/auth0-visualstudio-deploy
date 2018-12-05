@@ -1,27 +1,78 @@
 import _ from 'lodash';
 import path from 'path';
 import Promise from 'bluebird';
-import { constants } from 'auth0-source-control-extension-tools';
+import vsts from 'vso-node-api';
+import { constants, unifyDatabases, unifyScripts } from 'auth0-source-control-extension-tools';
 
-import unifyData from './unifyData';
-import common from './common';
-import logger from './logger';
+import config from './config';
+import logger from '../lib/logger';
 
 /*
  * TFS API connection
  */
-let apiInstance = null;
+let gitApi = null;
 
 const getApi = () => {
-  if (!apiInstance) {
-    return common.getApi()
-      .then((api) => {
-        apiInstance = api;
-        return apiInstance;
-      });
+  if (!gitApi) {
+    const collectionURL = `https://${config('TFS_INSTANCE')}.visualstudio.com/${config('TFS_COLLECTION')}`;
+    const vsCredentials = vsts.getBasicHandler(config('TFS_TOKEN'), '');
+    const vsConnection = new vsts.WebApi(collectionURL, vsCredentials);
+    gitApi = vsConnection.getQGitApi();
   }
 
-  return Promise.resolve(apiInstance);
+  return gitApi;
+};
+
+/*
+ * Check if a file is part of the rules folder.
+ */
+const isRule = (file) =>
+file.indexOf(`${constants.RULES_DIRECTORY}/`) === 0;
+
+/*
+ * Check if a file is part of the database folder.
+ */
+const isDatabaseConnection = (file) =>
+file.indexOf(`${constants.DATABASE_CONNECTIONS_DIRECTORY}/`) === 0;
+
+/*
+ * Check if a file is part of the pages folder.
+ */
+const isPage = (file) =>
+file.indexOf(`${constants.PAGES_DIRECTORY}/`) === 0 && constants.PAGE_NAMES.indexOf(file.split('/').pop()) >= 0;
+
+/*
+ * Get the details of a database file script.
+ */
+const getDatabaseScriptDetails = (filename) => {
+  const parts = filename.split('/');
+  if (parts.length === 3 && /\.js$/i.test(parts[2])) {
+    const scriptName = path.parse(parts[2]).name;
+    if (constants.DATABASE_SCRIPTS.indexOf(scriptName) > -1) {
+      return {
+        database: parts[1],
+        name: path.parse(scriptName).name
+      };
+    }
+  }
+
+  return null;
+};
+
+/*
+ * Only Javascript and JSON files.
+ */
+const validFilesOnly = (fileName) => {
+  if (isPage(fileName)) {
+    return true;
+  } else if (isRule(fileName)) {
+    return /\.(js|json)$/i.test(fileName);
+  } else if (isDatabaseConnection(fileName)) {
+    const script = getDatabaseScriptDetails(fileName);
+    return !!script;
+  }
+
+  return false;
 };
 
 /*
@@ -34,18 +85,16 @@ export const hasChanges = (commitId, repoId) =>
     try {
       let files = [];
 
-      return getApi()
-        .then(api => api.getChanges(commitId, repoId))
-        .then(data => {
-          files = data ? files.concat(data.changes) : [];
-        })
-        .then(() => resolve(_.chain(files)
-          .map(file => file.item.path)
-          .flattenDeep()
-          .uniq()
-          .filter(f => common.validFilesOnly(f.slice(1)))
-          .value()
-          .length > 0))
+      getApi().getChanges(commitId, repoId).then(data => {
+        files = files.concat(data.changes);
+      })
+      .then(() => resolve(_.chain(files)
+            .map(file => file.item.path)
+            .flattenDeep()
+            .uniq()
+            .filter(f => validFilesOnly(f.slice(1)))
+            .value()
+            .length > 0))
         .catch(e => reject(e));
     } catch (e) {
       return reject(e);
@@ -62,8 +111,7 @@ const getCommitId = (repositoryId, branch) =>
     }
 
     try {
-      return getApi()
-        .then(api => api.getBranch(repositoryId, branch))
+      return getApi().getBranch(repositoryId, branch)
         .then(data => {
           if (!data) {
             logger.error(`Branch '${branch}' not found`);
@@ -84,12 +132,12 @@ const getCommitId = (repositoryId, branch) =>
 const getTree = (repositoryId, branch) =>
   new Promise((resolve, reject) => {
     getCommitId(repositoryId, branch)
-      .then(commitId => getApi().then(api => api.getCommit(commitId, repositoryId)))
-      .then(commit => getApi().then(api => api.getTree(repositoryId, commit.treeId, null, null, true)))
+      .then(commitId => getApi().getCommit(commitId, repositoryId))
+      .then(commit => getApi().getTree(repositoryId, commit.treeId, null, null, true))
       .then(data =>
         resolve(data.treeEntries
           .filter(f => f.gitObjectType === 3)
-          .filter(f => common.validFilesOnly(f.relativePath))
+          .filter(f => validFilesOnly(f.relativePath))
           .map(f => ({ path: f.relativePath, id: f.objectId }))))
       .catch(e => reject(e));
   });
@@ -100,25 +148,23 @@ const getTree = (repositoryId, branch) =>
 const downloadFile = (repositoryId, branch, file) =>
   new Promise((resolve, reject) => {
     try {
-      getApi()
-        .then(api => api.getBlobContent(repositoryId, file.id, null, true))
-        .then(data => {
-          if (data) {
-            let result = '';
+      getApi().getBlobContent(repositoryId, file.id, null, true).then(data => {
+        if (data) {
+          let result = '';
 
-            data.on('data', (chunk) => {
-              result += chunk;
-            });
+          data.on('data', (chunk) => {
+            result += chunk;
+          });
 
-            data.on('end', () => resolve({
-              fileName: file.path,
-              contents: result
-            }));
-          } else {
-            logger.error(`Error downloading '${file.path}'`);
-            reject(new Error(`Error downloading '${file.path}'`));
-          }
-        });
+          data.on('end', () => resolve({
+            fileName: file.path,
+            contents: result
+          }));
+        } else {
+          logger.error(`Error downloading '${file.path}'`);
+          reject(new Error(`Error downloading '${file.path}'`));
+        }
+      });
     } catch (e) {
       reject(e);
     }
@@ -157,43 +203,13 @@ const downloadRule = (repositoryId, branch, ruleName, rule) => {
 };
 
 /*
- * Download a single configurable file.
- */
-const downloadConfigurable = (repositoryId, branch, name, item) => {
-  const configurable = {
-    metadata: false,
-    name
-  };
-
-  const downloads = [];
-
-  if (item.configFile) {
-    downloads.push(downloadFile(repositoryId, branch, item.configFile)
-      .then(file => {
-        configurable.configFile = JSON.parse(file.contents);
-      }));
-  }
-
-  if (item.metadataFile) {
-    downloads.push(downloadFile(repositoryId, branch, item.metadataFile)
-      .then(file => {
-        configurable.metadata = true;
-        configurable.metadataFile = JSON.parse(file.contents);
-      }));
-  }
-
-  return Promise.all(downloads).then(() => configurable);
-};
-
-
-/*
  * Determine if we have the script, the metadata or both.
  */
 const getRules = (repositoryId, branch, files) => {
   // Rules object.
   const rules = {};
 
-  _.filter(files, f => common.isRule(f.path)).forEach(file => {
+  _.filter(files, f => isRule(f.path)).forEach(file => {
     const ruleName = path.parse(file.path).name;
     rules[ruleName] = rules[ruleName] || {};
 
@@ -208,39 +224,6 @@ const getRules = (repositoryId, branch, files) => {
 
   // Download all rules.
   return Promise.map(Object.keys(rules), (ruleName) => downloadRule(repositoryId, branch, ruleName, rules[ruleName]), { concurrency: 2 });
-};
-
-/*
- * Determine if we have the script, the metadata or both.
- */
-const getConfigurables = (repositoryId, branch, files, directory) => {
-  const configurables = {};
-
-  _.filter(files, f => common.isConfigurable(f.path, directory)).forEach(file => {
-    let meta = false;
-    let name = path.parse(file.path).name;
-    const ext = path.parse(file.path).ext;
-
-    if (ext === '.json') {
-      if (name.endsWith('.meta')) {
-        name = path.parse(name).name;
-        meta = true;
-      }
-
-      /* Initialize object if needed */
-      configurables[name] = configurables[name] || {};
-
-      if (meta) {
-        configurables[name].metadataFile = file;
-      } else {
-        configurables[name].configFile = file;
-      }
-    }
-  });
-
-  // Download all rules.
-  return Promise.map(Object.keys(configurables), (key) =>
-    downloadConfigurable(repositoryId, branch, key, configurables[key]), { concurrency: 2 });
 };
 
 /*
@@ -275,8 +258,8 @@ const downloadDatabaseScript = (repositoryId, branch, databaseName, scripts) => 
 const getDatabaseScripts = (repositoryId, branch, files) => {
   const databases = {};
 
-  _.filter(files, f => common.isDatabaseConnection(f.path)).forEach(file => {
-    const script = common.getDatabaseScriptDetails(file.path);
+  _.filter(files, f => isDatabaseConnection(f.path)).forEach(file => {
+    const script = getDatabaseScriptDetails(file.path);
     if (script) {
       databases[script.database] = databases[script.database] || [];
       databases[script.database].push({
@@ -291,66 +274,59 @@ const getDatabaseScripts = (repositoryId, branch, files) => {
 };
 
 /*
- * Download a single page or email script.
+ * Download a single page script.
  */
-const downloadTemplate = (repositoryId, branch, tplName, template) => {
+const downloadPage = (repositoryId, branch, pageName, page) => {
   const downloads = [];
-  const currentTpl = {
+  const currentPage = {
     metadata: false,
-    name: tplName
+    name: pageName
   };
 
-  if (template.file) {
-    downloads.push(downloadFile(repositoryId, branch, template.file)
+  if (page.file) {
+    downloads.push(downloadFile(repositoryId, branch, page.file)
       .then(file => {
-        currentTpl.htmlFile = file.contents;
+        currentPage.htmlFile = file.contents;
       }));
   }
 
-  if (template.meta_file) {
-    downloads.push(downloadFile(repositoryId, branch, template.meta_file)
+  if (page.meta_file) {
+    downloads.push(downloadFile(repositoryId, branch, page.meta_file)
       .then(file => {
-        currentTpl.metadata = true;
-        currentTpl.metadataFile = file.contents;
+        currentPage.metadata = true;
+        currentPage.metadataFile = file.contents;
       }));
   }
 
-  return Promise.all(downloads).then(() => currentTpl);
+  return Promise.all(downloads).then(() => currentPage);
 };
 
 /*
- * Get all html templates - emails/pages.
+ * Get all pages.
  */
-const getHtmlTemplates = (repositoryId, branch, files, dir, allowedNames) => {
-  const templates = {};
+const getPages = (repositoryId, branch, files) => {
+  const pages = {};
 
   // Determine if we have the script, the metadata or both.
-  _.filter(files, f => common.isTemplate(f.path, dir, allowedNames)).forEach(file => {
-    const tplName = path.parse(file.path).name;
+  _.filter(files, f => isPage(f.path)).forEach(file => {
+    const pageName = path.parse(file.path).name;
     const ext = path.parse(file.path).ext;
-    templates[tplName] = templates[tplName] || {};
+    pages[pageName] = pages[pageName] || {};
 
     if (ext !== '.json') {
-      templates[tplName].file = file;
-      templates[tplName].sha = file.sha;
-      templates[tplName].path = file.path;
+      pages[pageName].file = file;
+      pages[pageName].sha = file.sha;
+      pages[pageName].path = file.path;
     } else {
-      templates[tplName].meta_file = file;
-      templates[tplName].meta_sha = file.sha;
-      templates[tplName].meta_path = file.path;
+      pages[pageName].meta_file = file;
+      pages[pageName].meta_sha = file.sha;
+      pages[pageName].meta_path = file.path;
     }
   });
 
-  return Promise.map(Object.keys(templates), (name) =>
-    downloadTemplate(repositoryId, branch, name, templates[name]), { concurrency: 2 });
+  return Promise.map(Object.keys(pages), (pageName) =>
+    downloadPage(repositoryId, branch, pageName, pages[pageName]), { concurrency: 2 });
 };
-
-/*
- * Get email provider.
- */
-const getEmailProvider = (projectId, branch, files) =>
-  downloadConfigurable(projectId, branch, 'emailProvider', { configFile: _.find(files, f => common.isEmailProvider(f.path)) });
-
 
 /*
  * Get a list of all changes that need to be applied to rules and database scripts.
@@ -367,18 +343,15 @@ export const getChanges = (repositoryId, branch) =>
         const promises = {
           rules: getRules(repositoryId, branch, files),
           databases: getDatabaseScripts(repositoryId, branch, files),
-          emailProvider: getEmailProvider(repositoryId, branch, files),
-          emailTemplates: getHtmlTemplates(repositoryId, branch, files, constants.EMAIL_TEMPLATES_DIRECTORY, constants.EMAIL_TEMPLATES_NAMES),
-          pages: getHtmlTemplates(repositoryId, branch, files, constants.PAGES_DIRECTORY, constants.PAGE_NAMES),
-          clients: getConfigurables(repositoryId, branch, files, constants.CLIENTS_DIRECTORY),
-          clientGrants: getConfigurables(repositoryId, branch, files, constants.CLIENTS_GRANTS_DIRECTORY),
-          connections: getConfigurables(repositoryId, branch, files, constants.CONNECTIONS_DIRECTORY),
-          rulesConfigs: getConfigurables(repositoryId, branch, files, constants.RULES_CONFIGS_DIRECTORY),
-          resourceServers: getConfigurables(repositoryId, branch, files, constants.RESOURCE_SERVERS_DIRECTORY)
+          pages: getPages(repositoryId, branch, files)
         };
 
         return Promise.props(promises)
-          .then((result) => resolve(unifyData(result)));
+          .then(result => resolve({
+            rules: unifyScripts(result.rules),
+            databases: unifyDatabases(result.databases),
+            pages: unifyScripts(result.pages)
+          }));
       })
       .catch(e => reject(e));
   });
@@ -387,8 +360,7 @@ export const getChanges = (repositoryId, branch) =>
  * Get a repository id by name.
  */
 export const getRepositoryId = (name) =>
-  getApi()
-    .then(api => api.getRepositories())
+  getApi().getRepositories()
     .then(repositories => {
       if (!repositories) return null;
 

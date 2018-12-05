@@ -1,11 +1,11 @@
 import React, { Component } from 'react';
 import { Table, TableBody, TableCell, TableTextCell, TableHeader, TableColumn, TableRow, Alert } from 'auth0-extension-ui';
 
-export default class ConfigurationTable extends Component {
+export default class RulesTable extends Component {
   static propTypes = {
-    items: React.PropTypes.object.isRequired,
+    rules: React.PropTypes.object.isRequired,
     loading: React.PropTypes.bool.isRequired,
-    saveManualItems: React.PropTypes.func.isRequired,
+    saveManualRules: React.PropTypes.func.isRequired,
     openNotification: React.PropTypes.func.isRequired,
     closeNotification: React.PropTypes.func.isRequired,
     showNotification: React.PropTypes.bool.isRequired,
@@ -15,45 +15,45 @@ export default class ConfigurationTable extends Component {
   constructor(props) {
     super(props);
     this.state = {
-      items: this.toArray(props.items)
+      rules: this.toArray(props.rules)
     };
   }
 
   componentWillReceiveProps(nextProps) {
     this.setState({
-      items: this.toArray(nextProps.items)
+      rules: this.toArray(nextProps.rules)
     });
   }
 
   shouldComponentUpdate(nextProps) {
-    return nextProps.items !== this.props.items || this.props.showNotification !== nextProps.showNotification;
+    return nextProps.rules !== this.props.rules || this.props.showNotification !== nextProps.showNotification;
   }
 
   onChangeManual = () => {
-    const manualItems = [];
-    this.state.items.forEach((item) => {
-      if (this.refs[item.name].checked) {
-        manualItems.push(item.name);
+    const manualRules = [];
+    this.state.rules.forEach((rule) => {
+      if (this.refs[rule.name].checked) {
+        manualRules.push(rule.name);
       }
     });
 
-    this.props.saveManualItems({ names: manualItems })
+    this.props.saveManualRules({ names: manualRules })
       .then(() => {
         this.props.openNotification();
         setTimeout(this.props.closeNotification, 10000);
       });
   }
 
-  toArray(itemsMap) {
-    const items = itemsMap && itemsMap.toJS();
-    return Object.keys(items).map((itemName) => ({
-      name: itemName,
-      isManual: items[itemName]
+  toArray(rulesMap) {
+    const rules = rulesMap && rulesMap.toJS();
+    return Object.keys(rules).map((ruleName) => ({
+      name: ruleName,
+      isManual: rules[ruleName]
     }));
   }
 
   render() {
-    const { items } = this.state;
+    const { rules } = this.state;
 
     return (
       <div>
@@ -61,25 +61,25 @@ export default class ConfigurationTable extends Component {
           show={this.props.showNotification}
           onDismiss={this.props.closeNotification}
           type={this.props.notificationType}
-          message={`Manual ${this.props.type} have been saved.`}
+          message="Manual rules have been saved."
         />
         <p>
-          {`${this.props.type} that are flagged as manual will not be deleted, but any changes to metadata (order/status) will still be applied.`}
+          Rules that are flagged as manual rules will not be deleted, but any changes to metadata (order/status) will still be applied.
         </p>
         <Table>
           <TableHeader>
             <TableColumn width="80%">Name</TableColumn>
-            <TableColumn width="20%">Manual Item</TableColumn>
+            <TableColumn width="20%">Manual Rule</TableColumn>
           </TableHeader>
           <TableBody>
-            {items.map((item) => (
-              <TableRow key={item.name}>
-                <TableTextCell>{item.name}</TableTextCell>
+            {rules.map((rule) => (
+              <TableRow key={rule.name}>
+                <TableTextCell>{rule.name}</TableTextCell>
                 <TableCell>
                   <div className="switch-animate">
                     <input
-                      className="uiswitch isManualItem" value={item.name} defaultChecked={item.isManual} type="checkbox"
-                      name="isManualItem" ref={item.name}
+                      className="uiswitch isManualRule" value={rule.name} defaultChecked={rule.isManual} type="checkbox"
+                      name="isManualRule" ref={rule.name}
                     />
                   </div>
                 </TableCell>
@@ -87,7 +87,7 @@ export default class ConfigurationTable extends Component {
             ))}
           </TableBody>
         </Table>
-        <button className="btn btn-success pull-right" onClick={this.onChangeManual}>{`Update Manual ${this.props.type}`}</button>
+        <button className="btn btn-success pull-right" onClick={this.onChangeManual}>Update Manual Rules</button>
       </div>
     );
   }

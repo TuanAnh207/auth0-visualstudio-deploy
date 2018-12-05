@@ -44,7 +44,7 @@ describe('rules reducer', () => {
     ).toEqual(
       {
         loading: false,
-        error: 'An error occurred while loading the rules: ERROR',
+        error: 'An error occured while loading the rules: ERROR',
         records: {},
         showNotification: false,
         notificationType: 'success'
@@ -92,7 +92,7 @@ describe('rules reducer', () => {
     ).toEqual(
       {
         loading: false,
-        error: 'An error occurred while updating the rules: ERROR',
+        error: 'An error occured while updating the rules: ERROR',
         records: {},
         showNotification: false,
         notificationType: 'success'
